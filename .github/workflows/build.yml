@@ -54,8 +54,8 @@ jobs:
                   applicationId = "com.mapeador.app"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "0.1"
+                  versionCode = 2
+                  versionName = "0.2"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -72,6 +72,7 @@ jobs:
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.VIBRATE" />
               <application
                   android:label="Mapeador"
                   android:theme="@android:style/Theme.DeviceDefault.Light">
@@ -117,33 +118,75 @@ jobs:
           import android.app.Activity
           import android.content.Intent
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.Settings
           import android.widget.Button
           import android.widget.LinearLayout
           import android.widget.TextView
 
           class MainActivity : Activity() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private lateinit var status: TextView
+
+              private val updater = object : Runnable {
+                  override fun run() {
+                      val conectado = if (MapService.connected) "SIM" else "NAO"
+                      val ligado = if (MapService.enabled) "LIGADO" else "DESLIGADO"
+                      status.text = "Servico conectado: " + conectado + "\n" +
+                          "Mapeamento: " + ligado + "\n" +
+                          "Teclas recebidas: " + MapService.keyCount + "\n" +
+                          "Ultima tecla: " + MapService.lastKey
+                      handler.postDelayed(this, 300)
+                  }
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   val layout = LinearLayout(this)
                   layout.orientation = LinearLayout.VERTICAL
                   layout.setPadding(48, 96, 48, 48)
+
                   val info = TextView(this)
-                  info.textSize = 16f
-                  info.text = "Mapeador v0.1\n\n" +
-                      "1. Toque no botão abaixo e ative o serviço Mapeador em Acessibilidade.\n" +
-                      "2. Abra o jogo, com o teclado conectado.\n" +
-                      "3. Aperte F8 para ligar ou desligar o mapeamento.\n\n" +
-                      "W A S D = joystick de movimento\n" +
-                      "Espaço, R, E, C, F = toques em posições da tela"
-                  val btn = Button(this)
-                  btn.text = "Abrir configurações de acessibilidade"
-                  btn.setOnClickListener {
+                  info.textSize = 15f
+                  info.text = "Mapeador v0.2 (diagnostico)\n\n" +
+                      "1. Ative o servico em Acessibilidade.\n" +
+                      "2. Aperte teclas no teclado e veja abaixo se elas aparecem.\n" +
+                      "3. F8 liga/desliga (ou use o botao).\n" +
+                      "W A S D = joystick. Espaco, R, E, C, F = toques.\n"
+
+                  status = TextView(this)
+                  status.textSize = 18f
+                  status.setPadding(0, 32, 0, 32)
+
+                  val btnAcc = Button(this)
+                  btnAcc.text = "Abrir configuracoes de acessibilidade"
+                  btnAcc.setOnClickListener {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   }
+
+                  val btnToggle = Button(this)
+                  btnToggle.text = "Ligar / desligar mapeamento"
+                  btnToggle.setOnClickListener {
+                      MapService.instance?.toggle()
+                  }
+
                   layout.addView(info)
-                  layout.addView(btn)
+                  layout.addView(status)
+                  layout.addView(btnToggle)
+                  layout.addView(btnAcc)
                   setContentView(layout)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  handler.post(updater)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(updater)
               }
           }
           EOF
@@ -151,8 +194,12 @@ jobs:
           package com.mapeador.app
 
           import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.AccessibilityServiceInfo
           import android.accessibilityservice.GestureDescription
+          import android.content.Intent
           import android.graphics.Path
+          import android.os.VibrationEffect
+          import android.os.Vibrator
           import android.view.KeyEvent
           import android.view.accessibility.AccessibilityEvent
           import android.widget.Toast
@@ -160,11 +207,18 @@ jobs:
 
           class MapService : AccessibilityService() {
 
-              private var enabled = false
+              companion object {
+                  @Volatile var instance: MapService? = null
+                  @Volatile var connected = false
+                  @Volatile var enabled = false
+                  @Volatile var lastKey = "nenhuma"
+                  @Volatile var keyCount = 0
+              }
+
               private var active = false
               private val held = mutableSetOf<Int>()
 
-              // posições em fração da tela (x, y) - ajustaremos depois
+              // posicoes em fracao da tela (x, y) - ajustaremos depois
               private val joyX = 0.18f
               private val joyY = 0.70f
               private val tapPos = mapOf(
@@ -179,18 +233,47 @@ jobs:
                   KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D
               )
 
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  val info = serviceInfo
+                  if (info != null) {
+                      info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                      serviceInfo = info
+                  }
+                  instance = this
+                  connected = true
+                  enabled = false
+                  Toast.makeText(this, "Mapeador conectado", Toast.LENGTH_SHORT).show()
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  connected = false
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() {}
 
+              fun toggle() {
+                  enabled = !enabled
+                  held.clear()
+                  if (!enabled) refresh()
+                  val v = getSystemService(Vibrator::class.java)
+                  v?.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
+                  val msg = if (enabled) "Mapeador LIGADO" else "Mapeador DESLIGADO"
+                  Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+              }
+
               override fun onKeyEvent(event: KeyEvent): Boolean {
                   val code = event.keyCode
+                  val acao = if (event.action == KeyEvent.ACTION_DOWN) " (apertou)" else " (soltou)"
+                  lastKey = KeyEvent.keyCodeToString(code) + acao
+                  keyCount++
+
                   if (code == KeyEvent.KEYCODE_F8) {
                       if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                          enabled = !enabled
-                          held.clear()
-                          if (!enabled) refresh()
-                          val msg = if (enabled) "Mapeador LIGADO" else "Mapeador DESLIGADO"
-                          Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                          toggle()
                       }
                       return true
                   }
