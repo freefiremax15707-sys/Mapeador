@@ -54,8 +54,8 @@ jobs:
                   applicationId = "com.mapeador.app"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "0.2"
+                  versionCode = 3
+                  versionName = "0.3"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -75,13 +75,18 @@ jobs:
               <uses-permission android:name="android.permission.VIBRATE" />
               <application
                   android:label="Mapeador"
-                  android:theme="@android:style/Theme.DeviceDefault.Light">
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <activity
+                      android:name=".EditorActivity"
+                      android:exported="false"
+                      android:screenOrientation="landscape"
+                      android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
                   <service
                       android:name=".MapService"
                       android:exported="true"
@@ -112,71 +117,246 @@ jobs:
               android:notificationTimeout="100"
               android:description="@string/service_desc" />
           EOF
+          cat > app/src/main/java/com/mapeador/app/Config.kt << 'EOF'
+          package com.mapeador.app
+
+          import android.content.Context
+          import android.view.KeyEvent
+
+          class Btn(val key: Int, var x: Float, var y: Float)
+
+          object Config {
+              var joyX = 0.18f
+              var joyY = 0.70f
+              val buttons = mutableListOf<Btn>()
+              private var loaded = false
+
+              val reserved = setOf(
+                  KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A,
+                  KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D,
+                  KeyEvent.KEYCODE_F8
+              )
+
+              fun label(key: Int): String {
+                  return KeyEvent.keyCodeToString(key).removePrefix("KEYCODE_")
+              }
+
+              fun defaults() {
+                  joyX = 0.18f
+                  joyY = 0.70f
+                  buttons.clear()
+                  buttons.add(Btn(KeyEvent.KEYCODE_SPACE, 0.90f, 0.70f))
+                  buttons.add(Btn(KeyEvent.KEYCODE_R, 0.80f, 0.85f))
+                  buttons.add(Btn(KeyEvent.KEYCODE_E, 0.75f, 0.60f))
+                  buttons.add(Btn(KeyEvent.KEYCODE_C, 0.90f, 0.88f))
+                  buttons.add(Btn(KeyEvent.KEYCODE_F, 0.70f, 0.75f))
+              }
+
+              fun load(ctx: Context) {
+                  if (loaded) return
+                  loaded = true
+                  val s = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).getString("data", null)
+                  if (s == null) {
+                      defaults()
+                      return
+                  }
+                  try {
+                      val parts = s.split(";")
+                      val j = parts[0].split(",")
+                      val jx = j[0].toFloat()
+                      val jy = j[1].toFloat()
+                      val lista = mutableListOf<Btn>()
+                      for (i in 1 until parts.size) {
+                          if (parts[i].isEmpty()) continue
+                          val p = parts[i].split(",")
+                          lista.add(Btn(p[0].toInt(), p[1].toFloat(), p[2].toFloat()))
+                      }
+                      joyX = jx
+                      joyY = jy
+                      buttons.clear()
+                      buttons.addAll(lista)
+                  } catch (e: Exception) {
+                      defaults()
+                  }
+              }
+
+              fun save(ctx: Context) {
+                  val sb = StringBuilder()
+                  sb.append(joyX).append(",").append(joyY)
+                  for (b in buttons) {
+                      sb.append(";").append(b.key).append(",").append(b.x).append(",").append(b.y)
+                  }
+                  ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                      .edit().putString("data", sb.toString()).apply()
+              }
+          }
+          EOF
           cat > app/src/main/java/com/mapeador/app/MainActivity.kt << 'EOF'
           package com.mapeador.app
 
           import android.app.Activity
           import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
           import android.provider.Settings
+          import android.view.ViewGroup
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
           import android.widget.TextView
+          import android.widget.Toast
 
           class MainActivity : Activity() {
 
               private val handler = Handler(Looper.getMainLooper())
-              private lateinit var status: TextView
+              private lateinit var tvService: TextView
+              private lateinit var tvMap: TextView
+              private lateinit var tvKeys: TextView
+              private lateinit var tvMapped: TextView
+
+              private val green = Color.parseColor("#00E5A0")
+              private val red = Color.parseColor("#FF4D6D")
+              private val purple = Color.parseColor("#7C5CFF")
+              private val gray = Color.parseColor("#8A93B2")
 
               private val updater = object : Runnable {
                   override fun run() {
-                      val conectado = if (MapService.connected) "SIM" else "NAO"
-                      val ligado = if (MapService.enabled) "LIGADO" else "DESLIGADO"
-                      status.text = "Servico conectado: " + conectado + "\n" +
-                          "Mapeamento: " + ligado + "\n" +
-                          "Teclas recebidas: " + MapService.keyCount + "\n" +
-                          "Ultima tecla: " + MapService.lastKey
+                      if (MapService.connected) {
+                          tvService.text = "\u25CF Serviço conectado"
+                          tvService.setTextColor(green)
+                      } else {
+                          tvService.text = "\u25CF Serviço desconectado (ative em Acessibilidade)"
+                          tvService.setTextColor(red)
+                      }
+                      if (MapService.enabled) {
+                          tvMap.text = "\u25CF Mapeamento LIGADO"
+                          tvMap.setTextColor(green)
+                      } else {
+                          tvMap.text = "\u25CF Mapeamento desligado"
+                          tvMap.setTextColor(gray)
+                      }
+                      tvKeys.text = "Teclas recebidas: " + MapService.keyCount +
+                          "\nÚltima: " + MapService.lastKey
+                      val sb = StringBuilder("W A S D = joystick\n")
+                      for (b in Config.buttons) {
+                          sb.append(Config.label(b.key)).append("   ")
+                      }
+                      tvMapped.text = sb.toString()
                       handler.postDelayed(this, 300)
                   }
               }
 
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun tv(t: String, size: Float, color: Int, bold: Boolean = false): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = size
+                  v.setTextColor(color)
+                  if (bold) v.typeface = Typeface.DEFAULT_BOLD
+                  return v
+              }
+
+              private fun card(): LinearLayout {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.parseColor("#151B2B"))
+                  bg.cornerRadius = dp(20).toFloat()
+                  bg.setStroke(dp(1), Color.parseColor("#2A3350"))
+                  c.background = bg
+                  c.setPadding(dp(18), dp(16), dp(18), dp(16))
+                  val lp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  lp.topMargin = dp(14)
+                  c.layoutParams = lp
+                  return c
+              }
+
+              private fun styledButton(label: String, bgColor: Int, textColor: Int, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = label
+                  b.isAllCaps = false
+                  b.textSize = 15f
+                  b.setTextColor(textColor)
+                  val bg = GradientDrawable()
+                  bg.setColor(bgColor)
+                  bg.cornerRadius = dp(16).toFloat()
+                  b.background = bg
+                  val lp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      dp(54)
+                  )
+                  lp.topMargin = dp(12)
+                  b.layoutParams = lp
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val layout = LinearLayout(this)
-                  layout.orientation = LinearLayout.VERTICAL
-                  layout.setPadding(48, 96, 48, 48)
+                  Config.load(this)
+                  window.statusBarColor = Color.parseColor("#0B0F1A")
+                  window.navigationBarColor = Color.parseColor("#0B0F1A")
 
-                  val info = TextView(this)
-                  info.textSize = 15f
-                  info.text = "Mapeador v0.2 (diagnostico)\n\n" +
-                      "1. Ative o servico em Acessibilidade.\n" +
-                      "2. Aperte teclas no teclado e veja abaixo se elas aparecem.\n" +
-                      "3. F8 liga/desliga (ou use o botao).\n" +
-                      "W A S D = joystick. Espaco, R, E, C, F = toques.\n"
+                  val scroll = ScrollView(this)
+                  scroll.setBackgroundColor(Color.parseColor("#0B0F1A"))
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(20), dp(48), dp(20), dp(32))
+                  scroll.addView(root)
 
-                  status = TextView(this)
-                  status.textSize = 18f
-                  status.setPadding(0, 32, 0, 32)
+                  val title = tv("MAPEADOR", 30f, Color.WHITE, true)
+                  title.letterSpacing = 0.12f
+                  root.addView(title)
+                  root.addView(tv("Teclado e mouse nos jogos do celular  \u2022  v0.3", 13f, gray))
 
-                  val btnAcc = Button(this)
-                  btnAcc.text = "Abrir configuracoes de acessibilidade"
-                  btnAcc.setOnClickListener {
+                  val c1 = card()
+                  c1.addView(tv("STATUS", 12f, purple, true))
+                  tvService = tv("", 16f, gray, true)
+                  tvService.setPadding(0, dp(10), 0, 0)
+                  tvMap = tv("", 16f, gray, true)
+                  tvMap.setPadding(0, dp(6), 0, 0)
+                  tvKeys = tv("", 13f, gray)
+                  tvKeys.setPadding(0, dp(10), 0, 0)
+                  c1.addView(tvService)
+                  c1.addView(tvMap)
+                  c1.addView(tvKeys)
+                  root.addView(c1)
+
+                  val c2 = card()
+                  c2.addView(tv("TECLAS MAPEADAS", 12f, purple, true))
+                  tvMapped = tv("", 15f, Color.WHITE)
+                  tvMapped.setPadding(0, dp(10), 0, 0)
+                  c2.addView(tvMapped)
+                  root.addView(c2)
+
+                  root.addView(styledButton("Ligar / desligar mapeamento (F8)", green, Color.parseColor("#06251C")) {
+                      val s = MapService.instance
+                      if (s != null) {
+                          s.toggle()
+                      } else {
+                          Toast.makeText(this, "Ative o serviço em Acessibilidade primeiro", Toast.LENGTH_SHORT).show()
+                      }
+                  })
+                  root.addView(styledButton("Editar posições dos botões", purple, Color.WHITE) {
+                      startActivity(Intent(this, EditorActivity::class.java))
+                  })
+                  root.addView(styledButton("Ativar serviço (Acessibilidade)", Color.parseColor("#2A3350"), Color.WHITE) {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                  }
+                  })
 
-                  val btnToggle = Button(this)
-                  btnToggle.text = "Ligar / desligar mapeamento"
-                  btnToggle.setOnClickListener {
-                      MapService.instance?.toggle()
-                  }
+                  val dica = tv("Dica: em Bateria, deixe o Mapeador como \"Sem restrições\" para o serviço não ser fechado.", 12f, gray)
+                  dica.setPadding(0, dp(16), 0, 0)
+                  root.addView(dica)
 
-                  layout.addView(info)
-                  layout.addView(status)
-                  layout.addView(btnToggle)
-                  layout.addView(btnAcc)
-                  setContentView(layout)
+                  setContentView(scroll)
               }
 
               override fun onResume() {
@@ -190,146 +370,98 @@ jobs:
               }
           }
           EOF
-          cat > app/src/main/java/com/mapeador/app/MapService.kt << 'EOF'
+          cat > app/src/main/java/com/mapeador/app/EditorView.kt << 'EOF'
           package com.mapeador.app
 
-          import android.accessibilityservice.AccessibilityService
-          import android.accessibilityservice.AccessibilityServiceInfo
-          import android.accessibilityservice.GestureDescription
-          import android.content.Intent
-          import android.graphics.Path
-          import android.os.VibrationEffect
-          import android.os.Vibrator
-          import android.view.KeyEvent
-          import android.view.accessibility.AccessibilityEvent
-          import android.widget.Toast
-          import kotlin.math.sqrt
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.view.MotionEvent
+          import android.view.View
 
-          class MapService : AccessibilityService() {
+          class EditorView(ctx: Context) : View(ctx) {
 
-              companion object {
-                  @Volatile var instance: MapService? = null
-                  @Volatile var connected = false
-                  @Volatile var enabled = false
-                  @Volatile var lastKey = "nenhuma"
-                  @Volatile var keyCount = 0
+              // -2 = nada selecionado, -1 = joystick, outro valor = código da tecla
+              var selKey = -2
+
+              private val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val paintFill = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val paintStroke = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val paintText = Paint(Paint.ANTI_ALIAS_FLAG)
+
+              init {
+                  paintGrid.color = Color.parseColor("#1A2138")
+                  paintGrid.strokeWidth = 2f
+                  paintStroke.style = Paint.Style.STROKE
+                  paintStroke.strokeWidth = 5f
+                  paintText.color = Color.WHITE
+                  paintText.textAlign = Paint.Align.CENTER
+                  paintText.isFakeBoldText = true
               }
 
-              private var active = false
-              private val held = mutableSetOf<Int>()
+              private fun joyR(): Float = height * 0.12f
+              private fun btnR(): Float = height * 0.065f
 
-              // posicoes em fracao da tela (x, y) - ajustaremos depois
-              private val joyX = 0.18f
-              private val joyY = 0.70f
-              private val tapPos = mapOf(
-                  KeyEvent.KEYCODE_SPACE to Pair(0.90f, 0.70f),
-                  KeyEvent.KEYCODE_R to Pair(0.80f, 0.85f),
-                  KeyEvent.KEYCODE_E to Pair(0.75f, 0.60f),
-                  KeyEvent.KEYCODE_C to Pair(0.90f, 0.88f),
-                  KeyEvent.KEYCODE_F to Pair(0.70f, 0.75f)
-              )
-              private val moveKeys = setOf(
-                  KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A,
-                  KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D
-              )
-
-              override fun onServiceConnected() {
-                  super.onServiceConnected()
-                  val info = serviceInfo
-                  if (info != null) {
-                      info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
-                      serviceInfo = info
+              override fun onDraw(canvas: Canvas) {
+                  canvas.drawColor(Color.parseColor("#0B0F1A"))
+                  for (i in 1..9) {
+                      val gx = width * i / 10f
+                      val gy = height * i / 10f
+                      canvas.drawLine(gx, 0f, gx, height.toFloat(), paintGrid)
+                      canvas.drawLine(0f, gy, width.toFloat(), gy, paintGrid)
                   }
-                  instance = this
-                  connected = true
-                  enabled = false
-                  Toast.makeText(this, "Mapeador conectado", Toast.LENGTH_SHORT).show()
+
+                  val jx = Config.joyX * width
+                  val jy = Config.joyY * height
+                  paintFill.color = Color.parseColor("#337C5CFF")
+                  canvas.drawCircle(jx, jy, joyR(), paintFill)
+                  paintStroke.color = if (selKey == -1) Color.parseColor("#00E5A0") else Color.parseColor("#7C5CFF")
+                  canvas.drawCircle(jx, jy, joyR(), paintStroke)
+                  paintText.textSize = joyR() * 0.35f
+                  canvas.drawText("W A S D", jx, jy + paintText.textSize / 3f, paintText)
+
+                  for (b in Config.buttons) {
+                      val bx = b.x * width
+                      val by = b.y * height
+                      paintFill.color = Color.parseColor("#3300E5A0")
+                      canvas.drawCircle(bx, by, btnR(), paintFill)
+                      paintStroke.color = if (selKey == b.key) Color.parseColor("#FFD166") else Color.parseColor("#00E5A0")
+                      canvas.drawCircle(bx, by, btnR(), paintStroke)
+                      val label = Config.label(b.key)
+                      paintText.textSize = if (label.length > 3) btnR() * 0.42f else btnR() * 0.8f
+                      canvas.drawText(label, bx, by + paintText.textSize / 3f, paintText)
+                  }
               }
 
-              override fun onUnbind(intent: Intent?): Boolean {
-                  connected = false
-                  instance = null
-                  return super.onUnbind(intent)
+              private fun hit(x: Float, y: Float): Int {
+                  for (b in Config.buttons.reversed()) {
+                      val dx = x - b.x * width
+                      val dy = y - b.y * height
+                      if (dx * dx + dy * dy <= btnR() * btnR() * 1.5f) return b.key
+                  }
+                  val jx = x - Config.joyX * width
+                  val jy = y - Config.joyY * height
+                  if (jx * jx + jy * jy <= joyR() * joyR()) return -1
+                  return -2
               }
 
-              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-              override fun onInterrupt() {}
-
-              fun toggle() {
-                  enabled = !enabled
-                  held.clear()
-                  if (!enabled) refresh()
-                  val v = getSystemService(Vibrator::class.java)
-                  v?.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
-                  val msg = if (enabled) "Mapeador LIGADO" else "Mapeador DESLIGADO"
-                  Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-              }
-
-              override fun onKeyEvent(event: KeyEvent): Boolean {
-                  val code = event.keyCode
-                  val acao = if (event.action == KeyEvent.ACTION_DOWN) " (apertou)" else " (soltou)"
-                  lastKey = KeyEvent.keyCodeToString(code) + acao
-                  keyCount++
-
-                  if (code == KeyEvent.KEYCODE_F8) {
-                      if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                          toggle()
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          selKey = hit(e.x, e.y)
+                          invalidate()
                       }
-                      return true
-                  }
-                  if (!enabled) return false
-                  if (code !in moveKeys && code !in tapPos) return false
-                  val changed = if (event.action == KeyEvent.ACTION_DOWN) {
-                      held.add(code)
-                  } else if (event.action == KeyEvent.ACTION_UP) {
-                      held.remove(code)
-                  } else false
-                  if (changed) refresh()
-                  return true
-              }
-
-              private fun refresh() {
-                  val dm = resources.displayMetrics
-                  val w = dm.widthPixels.toFloat()
-                  val h = dm.heightPixels.toFloat()
-                  val builder = GestureDescription.Builder()
-                  var count = 0
-
-                  var dx = 0f
-                  var dy = 0f
-                  if (held.contains(KeyEvent.KEYCODE_W)) dy -= 1f
-                  if (held.contains(KeyEvent.KEYCODE_S)) dy += 1f
-                  if (held.contains(KeyEvent.KEYCODE_A)) dx -= 1f
-                  if (held.contains(KeyEvent.KEYCODE_D)) dx += 1f
-                  if (dx != 0f || dy != 0f) {
-                      val len = sqrt(dx * dx + dy * dy)
-                      val r = h * 0.12f
-                      val p = Path()
-                      p.moveTo(w * joyX, h * joyY)
-                      p.lineTo(w * joyX + dx / len * r, h * joyY + dy / len * r)
-                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 30000))
-                      count++
-                  }
-                  for (code in held) {
-                      val pos = tapPos[code] ?: continue
-                      val p = Path()
-                      p.moveTo(w * pos.first, h * pos.second)
-                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 30000))
-                      count++
-                  }
-                  if (count == 0) {
-                      if (!active) return
-                      val p = Path()
-                      p.moveTo(w * joyX, h * joyY)
-                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 1))
-                  }
-                  active = count > 0
-                  dispatchGesture(builder.build(), null, null)
-              }
-          }
-          EOF
-      - run: gradle assembleDebug
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mapeador-apk
-          path: app/build/outputs/apk/debug/*.apk
+                      MotionEvent.ACTION_MOVE -> {
+                          val fx = (e.x / width).coerceIn(0.03f, 0.97f)
+                          val fy = (e.y / height).coerceIn(0.05f, 0.95f)
+                          if (selKey == -1) {
+                              Config.joyX = fx
+                              Config.joyY = fy
+                          } else if (selKey >= 0) {
+                              val b = Config.buttons.firstOrNull { it.key == selKey }
+                              if (b != null) {
+                                  b.x = fx
+                                  b.y = fy
+                              }
+                     
