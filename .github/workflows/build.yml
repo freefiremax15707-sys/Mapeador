@@ -12,6 +12,239 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
+      - name: Criar projeto
+        run: |
+          mkdir -p app/src/main/java/com/mapeador/app app/src/main/res/xml app/src/main/res/values
+          cat > settings.gradle.kts << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Mapeador"
+          include(":app")
+          EOF
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.mapeador.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.mapeador.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Mapeador"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".MapService"
+                      android:exported="true"
+                      android:label="Mapeador"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <resources>
+              <string name="service_desc">Converte teclas do teclado em toques na tela.</string>
+          </resources>
+          EOF
+          cat > app/src/main/res/xml/accessibility_config.xml << 'EOF'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestFilterKeyEvents"
+              android:canPerformGestures="true"
+              android:canRequestFilterKeyEvents="true"
+              android:notificationTimeout="100"
+              android:description="@string/service_desc" />
+          EOF
+          cat > app/src/main/java/com/mapeador/app/MainActivity.kt << 'EOF'
+          package com.mapeador.app
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val layout = LinearLayout(this)
+                  layout.orientation = LinearLayout.VERTICAL
+                  layout.setPadding(48, 96, 48, 48)
+                  val info = TextView(this)
+                  info.textSize = 16f
+                  info.text = "Mapeador v0.1\n\n" +
+                      "1. Toque no botão abaixo e ative o serviço Mapeador em Acessibilidade.\n" +
+                      "2. Abra o jogo, com o teclado conectado.\n" +
+                      "3. Aperte F8 para ligar ou desligar o mapeamento.\n\n" +
+                      "W A S D = joystick de movimento\n" +
+                      "Espaço, R, E, C, F = toques em posições da tela"
+                  val btn = Button(this)
+                  btn.text = "Abrir configurações de acessibilidade"
+                  btn.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  layout.addView(info)
+                  layout.addView(btn)
+                  setContentView(layout)
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/mapeador/app/MapService.kt << 'EOF'
+          package com.mapeador.app
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import android.view.KeyEvent
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Toast
+          import kotlin.math.sqrt
+
+          class MapService : AccessibilityService() {
+
+              private var enabled = false
+              private var active = false
+              private val held = mutableSetOf<Int>()
+
+              // posições em fração da tela (x, y) - ajustaremos depois
+              private val joyX = 0.18f
+              private val joyY = 0.70f
+              private val tapPos = mapOf(
+                  KeyEvent.KEYCODE_SPACE to Pair(0.90f, 0.70f),
+                  KeyEvent.KEYCODE_R to Pair(0.80f, 0.85f),
+                  KeyEvent.KEYCODE_E to Pair(0.75f, 0.60f),
+                  KeyEvent.KEYCODE_C to Pair(0.90f, 0.88f),
+                  KeyEvent.KEYCODE_F to Pair(0.70f, 0.75f)
+              )
+              private val moveKeys = setOf(
+                  KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A,
+                  KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D
+              )
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              override fun onKeyEvent(event: KeyEvent): Boolean {
+                  val code = event.keyCode
+                  if (code == KeyEvent.KEYCODE_F8) {
+                      if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                          enabled = !enabled
+                          held.clear()
+                          if (!enabled) refresh()
+                          val msg = if (enabled) "Mapeador LIGADO" else "Mapeador DESLIGADO"
+                          Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                      }
+                      return true
+                  }
+                  if (!enabled) return false
+                  if (code !in moveKeys && code !in tapPos) return false
+                  val changed = if (event.action == KeyEvent.ACTION_DOWN) {
+                      held.add(code)
+                  } else if (event.action == KeyEvent.ACTION_UP) {
+                      held.remove(code)
+                  } else false
+                  if (changed) refresh()
+                  return true
+              }
+
+              private fun refresh() {
+                  val dm = resources.displayMetrics
+                  val w = dm.widthPixels.toFloat()
+                  val h = dm.heightPixels.toFloat()
+                  val builder = GestureDescription.Builder()
+                  var count = 0
+
+                  var dx = 0f
+                  var dy = 0f
+                  if (held.contains(KeyEvent.KEYCODE_W)) dy -= 1f
+                  if (held.contains(KeyEvent.KEYCODE_S)) dy += 1f
+                  if (held.contains(KeyEvent.KEYCODE_A)) dx -= 1f
+                  if (held.contains(KeyEvent.KEYCODE_D)) dx += 1f
+                  if (dx != 0f || dy != 0f) {
+                      val len = sqrt(dx * dx + dy * dy)
+                      val r = h * 0.12f
+                      val p = Path()
+                      p.moveTo(w * joyX, h * joyY)
+                      p.lineTo(w * joyX + dx / len * r, h * joyY + dy / len * r)
+                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 30000))
+                      count++
+                  }
+                  for (code in held) {
+                      val pos = tapPos[code] ?: continue
+                      val p = Path()
+                      p.moveTo(w * pos.first, h * pos.second)
+                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 30000))
+                      count++
+                  }
+                  if (count == 0) {
+                      if (!active) return
+                      val p = Path()
+                      p.moveTo(w * joyX, h * joyY)
+                      builder.addStroke(GestureDescription.StrokeDescription(p, 0, 1))
+                  }
+                  active = count > 0
+                  dispatchGesture(builder.build(), null, null)
+              }
+          }
+          EOF
       - run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
